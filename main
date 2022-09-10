@@ -1,0 +1,410 @@
+import json
+import random
+import flask
+from flask import Flask, request,  render_template, redirect
+import mysql_tools
+import datetime
+from alipay_tools import alipay_api
+
+app = Flask(__name__, static_folder='./templates')
+
+"""用户主界面"""
+@app.route('/')
+def index():
+    if request.cookies.get('user') is None:
+        res = flask.make_response(redirect('/login'))
+        return res
+
+    user = request.cookies.get('user')
+
+    uid = request.cookies.get('uid')
+    fund = request.cookies.get('fund')
+    phone = request.cookies.get('phone')
+    nickname = request.cookies.get('nickname')
+    jy = request.cookies.get('JY')
+    msg = [uid, fund, phone, nickname, jy]
+    pic = mysql_tools.get_pic(uid)
+
+    trace_data, total_count, total_distance = mysql_tools.trace_data(uid)
+    return render_template('index.html', msg=msg, user=user, trace_data=trace_data, total_count=total_count,
+                           total_distance=total_distance, pic=pic)
+
+"""登录界面，根据登录者的身份进入用户/管理员界面"""
+@app.route('/login', methods=['POST', 'GET'])
+def login():
+    if request.method == 'GET':
+        return render_template('page-login.html')
+    user = request.form.get('user')
+    password = request.form.get('password')
+
+    # 如果返回的uid不为空，证明登录成功，否则登陆失败
+    # status为1进入管理员界面，status为0进入用户界面
+    uid, status = mysql_tools.login_valid(user, password)
+
+    # 登录成功进行记录cookie、跳转页面等操作
+    if uid != '':
+        if status == '0':
+            initial, recent_use = mysql_tools.initial_data(uid)
+
+            response = flask.make_response(redirect('/'))
+            response.set_cookie('user', str(user))
+            response.set_cookie('uid', str(initial[0]))
+            response.set_cookie('fund', str(initial[1]))
+            response.set_cookie('phone', str(initial[2]))
+            response.set_cookie('nickname', str(initial[4]))
+            response.set_cookie('JY', str(initial[5]))
+
+            return response
+
+        if status == '1':
+            response = flask.make_response(redirect('root'))
+
+            response.set_cookie('uid', uid)
+            response.set_cookie('user', user)
+            return response
+
+    # 登录失败进行提示
+    else:
+        return '登录失败'
+
+"""用户钱包界面"""
+@app.route('/wallet')
+def wallet():
+    uid = request.cookies.get('uid')
+    phone = request.cookies.get('phone')
+    nickname = request.cookies.get('nickname')
+    user = request.cookies.get('user')
+    jy = request.cookies.get('JY')
+
+    pledge = mysql_tools.wallet_data(uid)
+
+    pic = mysql_tools.get_pic(uid)
+
+    if pledge == ():
+        return render_template('my-wallet.html', pledge=pledge, uid=uid, phone=phone, exist=0,
+                               nickname=nickname, user=user, pic=pic, jy=jy)
+    else:
+        return render_template('my-wallet.html', pledge=pledge, uid=uid, phone=phone, exist=1,
+                               nickname=nickname, user=user, pic=pic, jy=jy)
+
+"""管理员界面"""
+@app.route('/root')
+def root():
+    uid = request.cookies.get('uid')
+    user = request.cookies.get('user')
+
+    user_info, trace_info, bike_info, pledge_info = mysql_tools.initial_data_root()
+
+    bike = []
+    for i in bike_info:
+        temp = []
+
+        for item in i:
+            temp.append(item)
+        data = json.loads(i[3])
+        position = [data['x'], data['y']]
+        temp[3] = position
+
+        bike.append(temp)
+    print(bike)
+
+    result = []
+
+    for i in trace_info:
+        temp = []
+
+        for item in i:
+            temp.append(item)
+
+        path = json.loads(i[5])
+        temp.append(path["1"])
+        temp.append(path[str(len(path))])
+
+        result.append(temp)
+
+    return render_template('table-datatable-basic.html', uid=uid, user=user, user_info=user_info,
+                           trace_info=result, bike_info=bike, pledge_info=pledge_info)
+
+"""ajax请求用于返回轨迹json"""
+@app.route('/get_trace')
+def get_trace():
+    tid = request.args.get('tid')
+    trace_json = mysql_tools.get_trace_json(tid)
+    return trace_json[0][0]
+
+"""最近的单车导航页面"""
+@app.route('/bike_navigate')
+def bike_navigate():
+    nickname = request.cookies.get('nickname')
+    user = request.cookies.get('user')
+
+    uid = request.cookies.get('uid')
+    pic = mysql_tools.get_pic(uid)
+
+    return render_template('map-jqvmap.html', user=user, nickname=nickname, pic=pic)
+
+"""ajax请求用于返回单车位置"""
+@app.route('/get_bike_position')
+def get_bike_position():
+    data = mysql_tools.bike_position()
+    print(data)
+    return data
+
+"""用于用户查看并支付账单"""
+@app.route('/pay')
+def pay():
+    uid = request.cookies.get('uid')
+    data = mysql_tools.get_pay(uid)
+
+    # 起点终点
+    result = []
+    for i in data:
+        temp = []
+
+        for item in i:
+            temp.append(item)
+
+        path = json.loads(i[5])
+        temp.append(path["1"])
+        temp.append(path[str(len(path))])
+
+        result.append(temp)
+
+    user = request.cookies.get('user')
+    nickname = request.cookies.get('nickname')
+
+    pic = mysql_tools.get_pic(uid)
+
+    return render_template('pay.html', data=result, nickname=nickname, user=user, pic=pic)
+
+"""管理员修改用户信息用路由"""
+@app.route('/modify_user', methods=['POST', 'GET'])
+def modify_user():
+    uid = request.form.get('uid')
+    uid_root = request.cookies.get('uid')
+    nickname = request.form.get('nickname')
+    phone = request.form.get('phone')
+    state = request.form.get('state')
+
+    mysql_tools.root_modify_user(str(uid), str(nickname), str(phone), int(state))
+    d_info = datetime.datetime.now()
+
+    mysql_tools.log(uid_root, uid,
+                    '{}-{}-{} {}:{}:{}'.format(d_info.year, d_info.month, d_info.day, d_info.hour, d_info.minute,
+                                               d_info.second), '管理员修改用户')
+
+    response = flask.make_response(redirect('/root'))
+    return response
+
+"""管理员删除用户信息路由"""
+@app.route('/delete_user', methods=['POST', 'GET'])
+def delete_user():
+    uid = request.form.get('uid')
+
+    uid_root = request.cookies.get('uid')
+    d_info = datetime.datetime.now()
+
+    mysql_tools.log(uid_root, uid,
+                    '{}-{}-{} {}:{}:{}'.format(d_info.year, d_info.month, d_info.day, d_info.hour, d_info.minute,
+                                               d_info.second), '管理员删除用户')
+
+    mysql_tools.root_delete_user(uid)
+    response = flask.make_response(redirect('/root'))
+
+    return response
+
+@app.route('/alipay', methods=['GET', 'POST'])
+def alipay():
+    if request.method == 'POST':
+        trade_no = str(random.randint(1, 500000))
+        amount = float(request.form.get('amount'))
+        url = alipay_api.web_page_pay(trade_no, amount, '代币充值',
+                                      'http://127.0.0.1:5000/pay_ok?type={}&amount={}'.format('jy', amount))
+
+        response = flask.make_response(redirect(location=url))
+        return response
+
+    else:
+        trade_no = request.args.get('trade_no')
+        amount = request.args.get('amount')
+        subject = request.args.get('subject')
+        url = ''
+
+        if trade_no is None:
+            trade_no = str(random.randint(1, 500000))
+
+        if subject == '骑行支付':
+            jy = float(request.cookies.get('JY'))
+            if jy <= float(amount):
+                amount = str(float(amount) - jy)
+            else:
+                amount = '0'
+                jy = float(amount)
+
+            url = alipay_api.web_page_pay(trade_no, float(amount), subject, 'http://127.0.0.1:5000/pay_ok?type={}&tid={}&jy={}'.format('trace', trade_no, jy))
+        elif subject == '押金':
+            url = alipay_api.web_page_pay(trade_no, float(amount), subject, 'http://127.0.0.1:5000/pay_ok?type={}&uid={}&trade_no={}'.format(
+                'pledge', request.cookies.get('uid'), trade_no))
+            print("return_url" + url)
+
+        response = flask.make_response(redirect(location=url))
+        return response
+
+@app.route('/pay_ok')
+def pay_ok():
+    subject = request.args.get('type')
+
+    if subject == 'jy':
+        amount = float(request.args.get('amount'))
+        uid = request.cookies.get('uid')
+
+        mysql_tools.pay_jy(uid, amount)
+
+        response = flask.make_response(redirect("/wallet"))
+        jy = float(request.cookies.get('JY'))
+        response.set_cookie('JY', str(jy + amount))
+        return response
+
+    if subject == 'trace':
+        tid = request.args.get('tid')
+        jy = float(request.args.get('jy'))
+        uid = request.cookies.get('uid')
+
+        mysql_tools.pay_ok(tid)
+        mysql_tools.modify_jy(uid, jy)
+        response = flask.make_response(redirect("/wallet"))
+        jy_pre = request.cookies.get('JY')
+        response.set_cookie('JY', str(float(jy_pre) - jy))
+        return response
+
+    elif subject == 'pledge':
+        uid = request.args.get('uid')
+        trade_no = request.args.get('trade_no')
+
+        mysql_tools.pledge_ok(uid, trade_no)
+        return flask.make_response(redirect('/wallet'))
+
+    return "未知错误"
+
+@app.route('/pledge_withdraw')
+def pledge_withdraw():
+    uid = request.cookies.get('uid')
+    mysql_tools.pledge_withdraw_database(uid)
+    # 调用支付宝退款接口
+    return flask.make_response(redirect('/wallet'))
+
+@app.route('/user_modify_info', methods=['POST', 'GET'])
+def user_modify_info():
+    nickname = request.form.get('nickname')
+    phone = request.form.get('phone')
+    uid = request.cookies.get('uid')
+
+    mysql_tools.user_modify_info(uid, nickname, phone)
+
+    response = flask.make_response(redirect('/profile'))
+    if nickname != '':
+        response.set_cookie('nickname', nickname)
+    if phone != '':
+        response.set_cookie('phone', phone)
+
+    return response
+
+@app.route('/profile', methods=['POST', 'GET'])
+def profile():
+    user = request.cookies.get('user')
+    uid = request.cookies.get('uid')
+    phone = request.cookies.get('phone')
+    nickname = request.cookies.get('nickname')
+
+    pic = mysql_tools.get_pic(uid)
+
+    return render_template('profile.html', user=user, uid=uid, phone=phone, nickname=nickname, pic=pic)
+
+@app.route('/logout')
+def logout():
+    response = flask.make_response(redirect('/login'))
+
+    response.delete_cookie('uid')
+    response.delete_cookie('user')
+    return response
+
+"""管理员修改单车信息用路由"""
+@app.route('/modify_bike', methods=['POST', 'GET'])
+def modify_bike():
+    bid = request.form.get('bid')
+    lat = request.form.get('lat')
+    lng = request.form.get('lng')
+    s = request.form.get('s')
+
+    mysql_tools.root_modify_bike(str(bid), float(lat), float(lng), int(s))
+
+    uid = request.cookies.get('uid')
+    d_info = datetime.datetime.now()
+
+    mysql_tools.log(uid, bid,
+                    '{}-{}-{} {}:{}:{}'.format(d_info.year, d_info.month, d_info.day, d_info.hour, d_info.minute,
+                                               d_info.second), '管理员修改单车')
+
+    response = flask.make_response(redirect('/root'))
+    return response
+
+"""管理员进入日志页面"""
+@app.route('/log')
+def root_log():
+    user = request.cookies.get('user')
+    uid = request.cookies.get('uid')
+    log = mysql_tools.log_data()
+
+    return render_template('log.html', log=log, user=user, uid=uid)
+
+@app.route('/upload_pic', methods=['POST'])
+def upload_pic():
+    uid = request.cookies.get('uid')
+    b64 = request.form.get('load')
+    mysql_tools.user_blob(uid, b64)
+    return flask.make_response(redirect('/'))
+
+@app.route('/delete_bike', methods=['POST'])
+def delete_bike():
+    bid = request.form.get('bid')
+    mysql_tools.root_delete_bike(bid)
+
+    uid = request.cookies.get('uid')
+    d_info = datetime.datetime.now()
+
+    mysql_tools.log(uid, bid,
+                    '{}-{}-{} {}:{}:{}'.format(d_info.year, d_info.month, d_info.day, d_info.hour, d_info.minute,
+                                               d_info.second), '管理员删除单车')
+
+    return flask.make_response(redirect('root'))
+
+@app.route('/add_bike', methods=['POST'])
+def add_bike():
+    bid = request.form.get('bid')
+    lat = float(request.form.get('lat'))
+    lng = float(request.form.get('lng'))
+    type_ = request.form.get('type')
+
+    mysql_tools.root_add_bike(bid, lat, lng, type_)
+
+    uid = request.cookies.get('uid')
+    d_info = datetime.datetime.now()
+
+    mysql_tools.log(uid, bid, '{}-{}-{} {}:{}:{}'.format(d_info.year, d_info.month, d_info.day, d_info.hour, d_info.minute, d_info.second), '管理员添加单车')
+
+    return flask.make_response(redirect('root'))
+
+@app.route('/withdraw_jy', methods=['POST'])
+def withdraw_jy():
+    amount = float(request.form.get('amount'))
+    uid = request.cookies.get('uid')
+
+    mysql_tools.withdraw_jy(uid, amount)
+
+    response = flask.make_response(redirect('/wallet'))
+    jy = float(request.cookies.get('JY'))
+    response.set_cookie('JY', str(jy - amount))
+    return response
+
+if __name__ == '__main__':
+    app.run()
